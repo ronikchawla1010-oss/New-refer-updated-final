@@ -85,9 +85,7 @@ export async function initDatabase() {
       code TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'available',
       claimed_by BIGINT REFERENCES users(telegram_id) ON DELETE SET NULL,
-      claimed_at TIMESTAMPTZ,
-       -- Coupon codes are intentionally not unique: the same code may be
-       -- stocked multiple times as separate inventory items.
+      claimed_at TIMESTAMPTZ
     );
      ALTER TABLE coupons DROP CONSTRAINT IF EXISTS coupons_product_id_code_key;
     CREATE INDEX IF NOT EXISTS coupons_stock_idx ON coupons(product_id, status);
