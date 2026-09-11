@@ -65,10 +65,20 @@ export async function initDatabase() {
       name TEXT NOT NULL,
       required_points INTEGER NOT NULL CHECK (required_points >= 0),
       how_to_use TEXT NOT NULL DEFAULT '',
+       sort_order INTEGER NOT NULL DEFAULT 0,
       enabled BOOLEAN NOT NULL DEFAULT TRUE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     ALTER TABLE products ADD COLUMN IF NOT EXISTS how_to_use TEXT NOT NULL DEFAULT '';
+     ALTER TABLE products ADD COLUMN IF NOT EXISTS sort_order INTEGER NOT NULL DEFAULT 0;
+     UPDATE products
+     SET sort_order = ranked.position
+     FROM (
+       SELECT id, ROW_NUMBER() OVER (ORDER BY id DESC) - 1 AS position
+       FROM products
+     ) AS ranked
+     WHERE products.id = ranked.id
+       AND NOT EXISTS (SELECT 1 FROM products WHERE sort_order <> 0);
     CREATE TABLE IF NOT EXISTS coupons (
       id BIGSERIAL PRIMARY KEY,
       product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
@@ -76,8 +86,10 @@ export async function initDatabase() {
       status TEXT NOT NULL DEFAULT 'available',
       claimed_by BIGINT REFERENCES users(telegram_id) ON DELETE SET NULL,
       claimed_at TIMESTAMPTZ,
-      UNIQUE(product_id, code)
+       -- Coupon codes are intentionally not unique: the same code may be
+       -- stocked multiple times as separate inventory items.
     );
+     ALTER TABLE coupons DROP CONSTRAINT IF EXISTS coupons_product_id_code_key;
     CREATE INDEX IF NOT EXISTS coupons_stock_idx ON coupons(product_id, status);
     CREATE TABLE IF NOT EXISTS milestones (
       id SERIAL PRIMARY KEY,
@@ -321,7 +333,7 @@ export async function products(page = 0, limit = 6) {
   const result = await database().query<QueryResultRow>(
     `SELECT p.*,COUNT(c.id) FILTER(WHERE c.status='available')::int AS stock
      FROM products p LEFT JOIN coupons c ON c.product_id=p.id
-     GROUP BY p.id ORDER BY p.id DESC LIMIT $1 OFFSET $2`,
+     GROUP BY p.id ORDER BY p.sort_order ASC,p.id ASC LIMIT $1 OFFSET $2`,
     [limit, page * limit],
   );
   return result.rows;
@@ -339,28 +351,54 @@ export async function product(id: number) {
 export async function addProduct(name: string, points: number, howToUse: string, code: string) {
   return withTransaction(async (client) => {
     const created = await client.query<{ id: number }>(
-      "INSERT INTO products(name,required_points,how_to_use) VALUES($1,$2,$3) RETURNING id",
+      `INSERT INTO products(name,required_points,how_to_use,sort_order)
+       SELECT $1,$2,$3,COALESCE(MAX(sort_order),-1)+1 FROM products
+       RETURNING id`,
       [name, points, howToUse],
     );
-    await client.query(
-      "INSERT INTO coupons(product_id,code) VALUES($1,$2) ON CONFLICT(product_id,code) DO NOTHING",
-      [created.rows[0].id, code],
-    );
+    await client.query("INSERT INTO coupons(product_id,code) VALUES($1,$2)", [created.rows[0].id, code]);
     return created.rows[0].id;
   });
 }
 
 export async function addStock(productId: number, code: string) {
   return withTransaction(async (client) => {
-    await client.query(
-      "INSERT INTO coupons(product_id,code) VALUES($1,$2) ON CONFLICT(product_id,code) DO NOTHING",
-      [productId, code],
-    );
+    await client.query("INSERT INTO coupons(product_id,code) VALUES($1,$2)", [productId, code]);
     const result = await client.query<{ stock: string }>(
       "SELECT COUNT(*)::int AS stock FROM coupons WHERE product_id=$1 AND status='available'",
       [productId],
     );
     return Number(result.rows[0].stock);
+  });
+}
+
+export async function addStockBulk(productId: number, codes: string[]) {
+  return withTransaction(async (client) => {
+    for (const code of codes) {
+      await client.query("INSERT INTO coupons(product_id,code) VALUES($1,$2)", [productId, code]);
+    }
+    const result = await client.query<{ stock: string }>(
+      "SELECT COUNT(*)::int AS stock FROM coupons WHERE product_id=$1 AND status='available'",
+      [productId],
+    );
+    return { added: codes.length, stock: Number(result.rows[0].stock) };
+  });
+}
+
+export async function moveProduct(id: number, direction: "up" | "down") {
+  return withTransaction(async (client) => {
+    const result = await client.query<{ id: number }>(
+      "SELECT id FROM products ORDER BY sort_order ASC,id ASC",
+    );
+    const order = result.rows.map((row) => Number(row.id));
+    const currentIndex = order.indexOf(id);
+    const nextIndex = direction === "up" ? currentIndex - 1 : currentIndex + 1;
+    if (currentIndex < 0 || nextIndex < 0 || nextIndex >= order.length) return false;
+    [order[currentIndex], order[nextIndex]] = [order[nextIndex], order[currentIndex]];
+    for (const [position, productId] of order.entries()) {
+      await client.query("UPDATE products SET sort_order=$2 WHERE id=$1", [productId, position]);
+    }
+    return true;
   });
 }
 
@@ -577,7 +615,7 @@ export async function dashboard() {
 export async function adminProducts() {
   const result = await database().query<QueryResultRow>(
     `SELECT p.*,COUNT(c.id) FILTER(WHERE c.status='available')::int AS stock
-     FROM products p LEFT JOIN coupons c ON c.product_id=p.id GROUP BY p.id ORDER BY p.id DESC`,
+     FROM products p LEFT JOIN coupons c ON c.product_id=p.id GROUP BY p.id ORDER BY p.sort_order ASC,p.id ASC`,
   );
   return result.rows;
 }

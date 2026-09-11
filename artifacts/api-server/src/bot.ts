@@ -4,6 +4,7 @@ import {
   addMilestone,
   addProduct,
   addStock,
+  addStockBulk,
   adminList,
   adminProducts,
   adjustPoints,
@@ -25,6 +26,7 @@ import {
   isOwner,
   markStatus,
   milestones,
+  moveProduct,
   pendingBroadcasts,
   product,
   products,
@@ -559,7 +561,28 @@ async function adminStock(id: number, messageId: number) {
   const buttons = rows.map((row) => [{ text: `✏️ ${row.name}`, callback_data: `admin:product:${row.id}` }]);
   buttons.push([{ text: "➕ Add Product", callback_data: "admin:addproduct" }]);
   buttons.push([{ text: "➕ Add Stock", callback_data: "admin:addstock" }]);
+  buttons.push([{ text: "📦 Bulk Add Stock", callback_data: "admin:bulkstock" }]);
+  buttons.push([{ text: "↕️ Reorder Products", callback_data: "admin:reorder" }]);
   buttons.push([{ text: "⬅️ Back", callback_data: "admin:home" }]);
+  await edit(id, messageId, text, inline(...buttons), "HTML");
+}
+
+async function adminReorder(id: number, messageId: number) {
+  const rows = await adminProducts();
+  let text = "↕️ <b>REORDER PRODUCTS</b>\n\nMove products up or down to change the order users see them.\n\n";
+  if (!rows.length) text += "No products yet.\n";
+  rows.forEach((row, index) => {
+    text += `${index + 1}. <b>${html(row.name)}</b>\n`;
+  });
+  const buttons: AnyRecord[][] = [];
+  rows.forEach((row, index) => {
+    buttons.push([
+      { text: `⬆️ ${index + 1}`, callback_data: `admin:moveproduct:${row.id}:up` },
+      { text: `⬇️ ${index + 1}`, callback_data: `admin:moveproduct:${row.id}:down` },
+    ]);
+  });
+  buttons.push([{ text: "🔄 Refresh", callback_data: "admin:reorder" }]);
+  buttons.push([{ text: "⬅️ Stock Management", callback_data: "admin:stock" }]);
   await edit(id, messageId, text, inline(...buttons), "HTML");
 }
 
@@ -572,6 +595,7 @@ async function adminProduct(id: number, messageId: number, productId: number) {
   await edit(id, messageId, `🎁 <b>PRODUCT EDITOR</b>\n\n<b>${html(row.name)}</b>\n\n💎 Cost: <b>${row.required_points} points</b>\n📦 Available stock: <b>${row.stock}</b>\n📖 How to use: <b>${row.how_to_use ? "Configured" : "Not configured"}</b>\n${row.enabled ? "🟢 Enabled" : "🔴 Disabled"}`, inline(
     [{ text: row.enabled ? "🔴 Disable" : "🟢 Enable", callback_data: `admin:toggleproduct:${row.id}` }],
     [{ text: "➕ Add Stock", callback_data: `admin:addstock:${row.id}` }],
+    [{ text: "📦 Bulk Add Stock", callback_data: `admin:bulkstock:${row.id}` }],
     [{ text: "📖 How to Use", callback_data: `admin:howto:${row.id}` }],
     [{ text: "🗑️ Delete", callback_data: `admin:deleteproduct:${row.id}` }],
     [{ text: "⬅️ Back", callback_data: "admin:stock" }],
@@ -848,7 +872,22 @@ async function adminInput(id: number, message: AnyRecord, state: AnyRecord) {
   if (state.kind === "stockCode") {
     if (!text) return send(id, "Send one coupon code, link, or JSON item.");
     adminStates.set(id, { ...state, kind: "stockConfirm", code: text });
-    return send(id, "📦 Add this one coupon item?", inline([{ text: "✅ Confirm", callback_data: "admin:confirmstock" }], [{ text: "❌ Cancel", callback_data: "admin:cancelinput" }]));
+    return send(id, "📦 Add this one coupon item? Duplicate codes are accepted as separate stock items.", inline([{ text: "✅ Confirm", callback_data: "admin:confirmstock" }], [{ text: "❌ Cancel", callback_data: "admin:cancelinput" }]));
+  }
+  if (state.kind === "bulkStockCode") {
+    const codes = text
+      .split(/\r?\n/)
+      .map((code) => code.trim())
+      .filter(Boolean);
+    if (!codes.length) return send(id, "Send one coupon code per line.");
+    if (codes.length > 500) return send(id, "Send at most 500 coupon items in one bulk operation.");
+    adminStates.set(id, { ...state, kind: "bulkStockConfirm", codes });
+    return send(
+      id,
+      `📦 <b>BULK STOCK PREVIEW</b>\n\nProduct: <b>${html(state.productName)}</b>\nItems to add: <b>${codes.length}</b>\n\nOne item will be created for every non-empty line. Duplicate codes are accepted.`,
+      inline([{ text: "✅ Add All Items", callback_data: "admin:confirmbulkstock" }], [{ text: "❌ Cancel", callback_data: "admin:cancelinput" }]),
+      "HTML",
+    );
   }
   if (state.kind === "productHowToUseEdit") {
     if (text.length > 4000) return send(id, "Keep the How to Use message under 4,000 characters.");
@@ -1080,16 +1119,46 @@ async function adminCallback(query: AnyRecord) {
   }
   if (data.startsWith("admin:addstock:")) {
     const productId = num(data.split(":")[2]);
-    adminStates.set(id, { kind: "stockCode", productId });
+    const row = await product(productId);
+    if (!row) return send(id, "❌ Product not found.", inline([{ text: "⬅️ Stock Management", callback_data: "admin:stock" }]));
+    adminStates.set(id, { kind: "stockCode", productId, productName: row.name });
     return send(id, "Send one coupon item. Plain code, link, or JSON are all allowed. Add each item separately.");
   }
   if (data === "admin:confirmstock") {
     const state = adminStates.get(id);
     if (!state || state.kind !== "stockConfirm") return send(id, "❌ This input session expired.");
     const stock = await addStock(state.productId, state.code);
-    await audit(id, "stock_add", String(state.productId), "1 coupon item");
+    await audit(id, "stock_add", String(state.productId), "1 coupon item (duplicates allowed)");
     adminStates.delete(id);
     return send(id, `✅ Stock updated.\n📦 Available: ${stock}`, inline([{ text: "🎁 Stock Management", callback_data: "admin:stock" }]));
+  }
+  if (data === "admin:bulkstock") {
+    const rows = await adminProducts();
+    if (!rows.length) return send(id, "❌ Add a product first.", inline([{ text: "➕ Add Product", callback_data: "admin:addproduct" }]));
+    return send(id, "Select a product for bulk stock.", inline(...rows.map((row) => [{ text: row.name, callback_data: `admin:bulkstock:${row.id}` }]), [{ text: "❌ Cancel", callback_data: "admin:cancelinput" }]));
+  }
+  if (data.startsWith("admin:bulkstock:")) {
+    const productId = num(data.split(":")[2]);
+    const row = await product(productId);
+    if (!row) return send(id, "❌ Product not found.", inline([{ text: "⬅️ Stock Management", callback_data: "admin:stock" }]));
+    adminStates.set(id, { kind: "bulkStockCode", productId, productName: row.name });
+    return send(id, `Send coupon items for <b>${html(row.name)}</b>, one code/link/JSON item per line.\n\nYou can paste up to 500 lines. Duplicate codes are accepted.`, undefined, "HTML");
+  }
+  if (data === "admin:confirmbulkstock") {
+    const state = adminStates.get(id);
+    if (!state || state.kind !== "bulkStockConfirm" || !Array.isArray(state.codes)) return send(id, "❌ This input session expired.");
+    const result = await addStockBulk(state.productId, state.codes);
+    await audit(id, "stock_bulk_add", String(state.productId), `${result.added} coupon items (duplicates allowed)`);
+    adminStates.delete(id);
+    return send(id, `✅ Bulk stock added.\n📦 Items added: ${result.added}\n📦 Available: ${result.stock}`, inline([{ text: "🎁 Stock Management", callback_data: "admin:stock" }]));
+  }
+  if (data === "admin:reorder") return adminReorder(id, messageId);
+  if (data.startsWith("admin:moveproduct:")) {
+    const [, , , productId, direction] = data.split(":");
+    if (direction !== "up" && direction !== "down") return adminReorder(id, messageId);
+    await moveProduct(num(productId), direction);
+    await audit(id, "product_reorder", productId, direction);
+    return adminReorder(id, messageId);
   }
   if (data.startsWith("admin:howto:")) {
     const productId = num(data.split(":")[2]);
