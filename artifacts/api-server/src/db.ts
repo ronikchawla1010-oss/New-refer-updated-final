@@ -720,9 +720,17 @@ export async function createBroadcast(chatId: number, messageId: number) {
 
 export async function setBroadcastStatus(id: number, status: string) {
   await database().query(
-    "UPDATE broadcast_jobs SET status=$2,finished_at=CASE WHEN $2='done' THEN NOW() ELSE finished_at END WHERE id=$1",
+    "UPDATE broadcast_jobs SET status=$2,finished_at=CASE WHEN $2 IN ('done','cancelled') THEN NOW() ELSE finished_at END WHERE id=$1",
     [id, status],
   );
+}
+
+export async function startBroadcast(id: number) {
+  const result = await database().query(
+    "UPDATE broadcast_jobs SET status='sending' WHERE id=$1 AND status='draft' RETURNING id",
+    [id],
+  );
+  return result.rowCount === 1;
 }
 
 export async function broadcastJob(id: number) {
