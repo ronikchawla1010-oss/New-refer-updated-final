@@ -37,6 +37,7 @@ import {
   reserveCoupon,
   rewards,
   setBroadcastStatus,
+  startBroadcast,
   setMilestone,
   setProduct,
   setSetting,
@@ -804,7 +805,11 @@ async function beginBroadcast(adminId: number, message: AnyRecord) {
 async function runBroadcast(adminId: number, jobId: number) {
   const job = await broadcastJob(jobId);
   if (!job) return;
-  await setBroadcastStatus(jobId, "sending");
+  if (job.status === "draft") {
+    if (!(await startBroadcast(jobId))) return;
+  } else if (job.status !== "sending") {
+    return;
+  }
   let sent = num(job.sent);
   let failed = num(job.failed);
   let last = num(job.last_user_id);
@@ -817,6 +822,11 @@ async function runBroadcast(adminId: number, jobId: number) {
   );
   const progressMessageId = num(progressMessage?.message_id);
   for (const userId of users) {
+    const current = await broadcastJob(jobId);
+    if (!current || current.status === "cancelled") {
+      await edit(adminId, progressMessageId, "❌ <b>Broadcast cancelled</b>\n\nNo more messages will be sent.", inline([{ text: "⬅️ Admin Panel", callback_data: "admin:home" }]), "HTML").catch(() => undefined);
+      return;
+    }
     try {
       await telegram("copyMessage", { chat_id: userId, from_chat_id: job.source_chat_id, message_id: job.source_message_id });
       sent += 1;
@@ -844,6 +854,11 @@ async function runBroadcast(adminId: number, jobId: number) {
         "HTML",
       ).catch(() => undefined);
     }
+  }
+  const finalJob = await broadcastJob(jobId);
+  if (!finalJob || finalJob.status === "cancelled") {
+    await edit(adminId, progressMessageId, "❌ <b>Broadcast cancelled</b>\n\nNo more messages will be sent.", inline([{ text: "⬅️ Admin Panel", callback_data: "admin:home" }]), "HTML").catch(() => undefined);
+    return;
   }
   await setBroadcastStatus(jobId, "done");
   await edit(adminId, progressMessageId, `✅ <b>Broadcast complete</b>\n\n${progressBar(sent + failed, users.length)}\n\n✅ Sent: ${sent}\n❌ Failed: ${failed}`, inline([{ text: "⬅️ Admin Panel", callback_data: "admin:home" }]), "HTML").catch(() => undefined);
@@ -1325,8 +1340,8 @@ async function adminCallback(query: AnyRecord) {
   if (data.startsWith("broadcast:confirm:")) {
     const jobId = num(data.split(":")[2]);
     await audit(id, "broadcast_start", String(jobId));
-    await runBroadcast(id, jobId);
-    return;
+    runBroadcast(id, jobId).catch((error) => console.error("broadcast failed", error));
+    return send(id, "📤 Broadcast started. You can cancel it while it is running.", inline([{ text: "❌ Cancel Broadcast", callback_data: `broadcast:cancel:${jobId}` }]));
   }
   if (data.startsWith("broadcast:cancel:")) {
     const jobId = num(data.split(":")[2]);
