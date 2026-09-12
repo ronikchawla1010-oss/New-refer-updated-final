@@ -467,7 +467,7 @@ async function claimProduct(id: number, productId: number, milestoneId?: number)
   } catch (error) {
     if (!claimFinalized) {
       await finishClaim(reserved.claimId, false, errorText(error));
-      await send(id, "❌ Delivery failed temporarily. Your coupon was returned to stock. Please try again.", homeButton()).catch(() => undefined);
+      await send(id, "❌ Delivery failed temporarily. Your coupon was returned to stock and your points were refunded. Please try again.", homeButton()).catch(() => undefined);
     } else {
       await send(id, "⚠️ Your coupon was delivered, but the How to Use message could not be sent. Please contact support.", homeButton()).catch(() => undefined);
     }
