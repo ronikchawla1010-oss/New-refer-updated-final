@@ -1155,7 +1155,7 @@ async function adminCallback(query: AnyRecord) {
   }
   if (data === "admin:reorder") return adminReorder(id, messageId);
   if (data.startsWith("admin:moveproduct:")) {
-    const [, , , productId, direction] = data.split(":");
+    const [, , productId, direction] = data.split(":");
     if (direction !== "up" && direction !== "down") return adminReorder(id, messageId);
     await moveProduct(num(productId), direction);
     await audit(id, "product_reorder", productId, direction);
