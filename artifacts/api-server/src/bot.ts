@@ -569,17 +569,18 @@ async function adminStock(id: number, messageId: number) {
 
 async function adminReorder(id: number, messageId: number) {
   const rows = await adminProducts();
-  let text = "↕️ <b>REORDER PRODUCTS</b>\n\nMove products up or down to change the order users see them.\n\n";
+  let text = "↕️ <b>REORDER PRODUCTS</b>\n\nTap the button with a product name to move it up or down. Changes save immediately.\n\n";
   if (!rows.length) text += "No products yet.\n";
   rows.forEach((row, index) => {
     text += `${index + 1}. <b>${html(row.name)}</b>\n`;
   });
   const buttons: AnyRecord[][] = [];
   rows.forEach((row, index) => {
-    buttons.push([
-      { text: `⬆️ ${index + 1}`, callback_data: `admin:moveproduct:${row.id}:up` },
-      { text: `⬇️ ${index + 1}`, callback_data: `admin:moveproduct:${row.id}:down` },
-    ]);
+    const name = String(row.name).slice(0, 36);
+    const controls: AnyRecord[] = [];
+    if (index > 0) controls.push({ text: `⬆️ Up · ${name}`, callback_data: `admin:moveproduct:${row.id}:up` });
+    if (index < rows.length - 1) controls.push({ text: `⬇️ Down · ${name}`, callback_data: `admin:moveproduct:${row.id}:down` });
+    if (controls.length) buttons.push(controls);
   });
   buttons.push([{ text: "🔄 Refresh", callback_data: "admin:reorder" }]);
   buttons.push([{ text: "⬅️ Stock Management", callback_data: "admin:stock" }]);
@@ -1370,8 +1371,16 @@ export async function startBot() {
         else if (update.message) await handleMessage(update.message);
       }
     } catch (error) {
-      console.error("polling error", error);
-      await new Promise((resolve) => setTimeout(resolve, 2000));
+      const response = (error as AnyRecord).response as AnyRecord | undefined;
+      const retryAfter = Number(response?.parameters?.retry_after);
+      const delayMs =
+        Number.isFinite(retryAfter) && retryAfter > 0
+          ? Math.min(retryAfter * 1000, 60_000)
+          : response?.error_code === 502
+            ? 5_000
+            : 2_000;
+      console.error(`polling error; retrying in ${Math.ceil(delayMs / 1000)}s`, error);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
   }
 }
