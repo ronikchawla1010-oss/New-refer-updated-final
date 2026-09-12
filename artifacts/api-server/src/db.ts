@@ -118,6 +118,7 @@ export async function initDatabase() {
       delivered_at TIMESTAMPTZ,
       UNIQUE(user_id, product_id)
     );
+    ALTER TABLE claims DROP CONSTRAINT IF EXISTS claims_user_id_product_id_key;
     CREATE INDEX IF NOT EXISTS claims_user_idx ON claims(user_id, created_at DESC);
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
