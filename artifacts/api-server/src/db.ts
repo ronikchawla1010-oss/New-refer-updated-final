@@ -112,12 +112,14 @@ export async function initDatabase() {
       product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
       coupon_id BIGINT NOT NULL UNIQUE REFERENCES coupons(id) ON DELETE RESTRICT,
       milestone_id INTEGER REFERENCES milestones(id) ON DELETE SET NULL,
+      points_charged INTEGER NOT NULL DEFAULT 0 CHECK (points_charged >= 0),
       status TEXT NOT NULL DEFAULT 'reserved',
       error TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       delivered_at TIMESTAMPTZ,
       UNIQUE(user_id, product_id)
     );
+    ALTER TABLE claims ADD COLUMN IF NOT EXISTS points_charged INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE claims DROP CONSTRAINT IF EXISTS claims_user_id_product_id_key;
     CREATE INDEX IF NOT EXISTS claims_user_idx ON claims(user_id, created_at DESC);
     CREATE TABLE IF NOT EXISTS settings (
@@ -503,21 +505,24 @@ export async function reserveCoupon(userId: number, productId: number, milestone
       userId,
       productId,
     ]);
-    const prior = await client.query(
-      "SELECT 1 FROM claims WHERE user_id=$1 AND product_id=$2 AND status IN('reserved','delivered')",
-      [userId, productId],
-    );
-    if (prior.rowCount) return { error: "already" as const };
     const coupon = await client.query<{ id: string; code: string }>(
       `SELECT id,code FROM coupons WHERE product_id=$1 AND status='available'
        ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED`,
       [productId],
     );
     if (!coupon.rowCount) return { error: "stock" as const };
+    const charged = await client.query(
+      `UPDATE users
+       SET points=points-$2,updated_at=NOW()
+       WHERE telegram_id=$1 AND points >= $2
+       RETURNING points`,
+      [userId, Number(p.rows[0].required_points)],
+    );
+    if (!charged.rowCount) return { error: "points" as const };
     const claim = await client.query<{ id: string }>(
-      `INSERT INTO claims(user_id,product_id,coupon_id,milestone_id,status)
-       VALUES($1,$2,$3,$4,'reserved') RETURNING id`,
-      [userId, productId, coupon.rows[0].id, milestoneId ?? null],
+      `INSERT INTO claims(user_id,product_id,coupon_id,milestone_id,points_charged,status)
+       VALUES($1,$2,$3,$4,$5,'reserved') RETURNING id`,
+      [userId, productId, coupon.rows[0].id, milestoneId ?? null, Number(p.rows[0].required_points)],
     );
     await client.query(
       "UPDATE coupons SET status='reserved',claimed_by=$2,claimed_at=NOW() WHERE id=$1",
@@ -539,10 +544,11 @@ export async function finishClaim(claimId: number, success: boolean, error?: str
     );
     if (!claim.rowCount) return;
     if (success) {
-      await client.query(
-        "UPDATE claims SET status='delivered',delivered_at=NOW() WHERE id=$1 AND status='reserved'",
+      const delivered = await client.query(
+        "UPDATE claims SET status='delivered',delivered_at=NOW() WHERE id=$1 AND status='reserved' RETURNING id",
         [claimId],
       );
+      if (!delivered.rowCount) return;
       if (claim.rows[0].milestone_id) {
         await client.query(
           "UPDATE rewards SET status='claimed',claimed_at=NOW() WHERE user_id=$1 AND milestone_id=$2",
@@ -553,9 +559,14 @@ export async function finishClaim(claimId: number, success: boolean, error?: str
         claim.rows[0].coupon_id,
       ]);
     } else {
-      await client.query(
-        "UPDATE claims SET status='failed',error=$2 WHERE id=$1 AND status='reserved'",
+      const failed = await client.query<{ points_charged: number }>(
+        "UPDATE claims SET status='failed',error=$2,points_charged=0 WHERE id=$1 AND status='reserved' RETURNING points_charged",
         [claimId, error?.slice(0, 500) ?? "delivery failed"],
+      );
+      if (!failed.rowCount) return;
+      await client.query(
+        "UPDATE users SET points=points+$2,updated_at=NOW() WHERE telegram_id=$1",
+        [claim.rows[0].user_id, Number(failed.rows[0].points_charged)],
       );
       await client.query(
         "UPDATE coupons SET status='available',claimed_by=NULL,claimed_at=NULL WHERE id=$1 AND status='reserved'",
@@ -566,14 +577,29 @@ export async function finishClaim(claimId: number, success: boolean, error?: str
 }
 
 export async function releaseStaleClaims() {
-  await database().query(
-    `UPDATE coupons c SET status='available',claimed_by=NULL,claimed_at=NULL
-     FROM claims cl WHERE cl.coupon_id=c.id AND cl.status='reserved' AND cl.created_at < NOW()-INTERVAL '15 minutes'`,
-  );
-  await database().query(
-    `UPDATE claims SET status='failed',error='reservation expired'
-     WHERE status='reserved' AND created_at < NOW()-INTERVAL '15 minutes'`,
-  );
+  return withTransaction(async (client) => {
+    const stale = await client.query<{ id: string; user_id: string; coupon_id: string; points_charged: number }>(
+      `SELECT id,user_id,coupon_id,points_charged
+       FROM claims
+       WHERE status='reserved' AND created_at < NOW()-INTERVAL '15 minutes'
+       FOR UPDATE SKIP LOCKED`,
+    );
+    for (const claim of stale.rows) {
+      const failed = await client.query(
+        "UPDATE claims SET status='failed',error='reservation expired',points_charged=0 WHERE id=$1 AND status='reserved' RETURNING id",
+        [claim.id],
+      );
+      if (!failed.rowCount) continue;
+      await client.query(
+        "UPDATE users SET points=points+$2,updated_at=NOW() WHERE telegram_id=$1",
+        [claim.user_id, Number(claim.points_charged)],
+      );
+      await client.query(
+        "UPDATE coupons SET status='available',claimed_by=NULL,claimed_at=NULL WHERE id=$1 AND status='reserved'",
+        [claim.coupon_id],
+      );
+    }
+  });
 }
 
 export async function profile(id: number) {
