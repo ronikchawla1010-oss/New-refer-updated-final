@@ -560,7 +560,7 @@ export async function finishClaim(claimId: number, success: boolean, error?: str
       ]);
     } else {
       const failed = await client.query<{ points_charged: number }>(
-        "UPDATE claims SET status='failed',error=$2,points_charged=0 WHERE id=$1 AND status='reserved' RETURNING points_charged",
+        "UPDATE claims SET status='failed',error=$2 WHERE id=$1 AND status='reserved' RETURNING points_charged",
         [claimId, error?.slice(0, 500) ?? "delivery failed"],
       );
       if (!failed.rowCount) return;
@@ -568,6 +568,7 @@ export async function finishClaim(claimId: number, success: boolean, error?: str
         "UPDATE users SET points=points+$2,updated_at=NOW() WHERE telegram_id=$1",
         [claim.rows[0].user_id, Number(failed.rows[0].points_charged)],
       );
+      await client.query("UPDATE claims SET points_charged=0 WHERE id=$1", [claimId]);
       await client.query(
         "UPDATE coupons SET status='available',claimed_by=NULL,claimed_at=NULL WHERE id=$1 AND status='reserved'",
         [claim.rows[0].coupon_id],
