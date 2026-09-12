@@ -167,7 +167,8 @@ export async function initDatabase() {
       ('support_username','SupportBot','true'),
       ('support_message','For help, contact our Support Bot.','true'),
       ('maintenance_message','🛠️ The bot is temporarily under maintenance. Please try again later.','true'),
-      ('referrals_enabled','true','true')
+      ('referrals_enabled','true','true'),
+      ('referral_points','1','true')
     ON CONFLICT(key) DO NOTHING`,
   );
   const owner = Number(process.env.OWNER_ID);
@@ -288,8 +289,14 @@ export async function completeReferral(referredUserId: number) {
       "UPDATE referrals SET status='completed',completed_at=NOW() WHERE referred_user_id=$1",
       [referredUserId],
     );
-    await client.query("UPDATE users SET points=points+1,updated_at=NOW() WHERE telegram_id=$1", [
+    const setting = await client.query<{ value: string }>(
+      "SELECT value FROM settings WHERE key='referral_points' AND enabled=TRUE",
+    );
+    const configuredPoints = Number(setting.rows[0]?.value);
+    const points = Number.isSafeInteger(configuredPoints) && configuredPoints >= 0 ? configuredPoints : 1;
+    await client.query("UPDATE users SET points=points+$2,updated_at=NOW() WHERE telegram_id=$1", [
       referrerId,
+      points,
     ]);
     const totals = await client.query<{ total: string; valid: string; pending: string }>(
       `SELECT COUNT(*)::int AS total,
@@ -327,12 +334,11 @@ export async function allChannels() {
   return result.rows;
 }
 
-export async function products(page = 0, limit = 6) {
+export async function products(_page = 0, _limit = 6) {
   const result = await database().query<QueryResultRow>(
     `SELECT p.*,COUNT(c.id) FILTER(WHERE c.status='available')::int AS stock
      FROM products p LEFT JOIN coupons c ON c.product_id=p.id
-     GROUP BY p.id ORDER BY p.sort_order ASC,p.id ASC LIMIT $1 OFFSET $2`,
-    [limit, page * limit],
+     GROUP BY p.id ORDER BY p.sort_order ASC,p.id ASC`,
   );
   return result.rows;
 }

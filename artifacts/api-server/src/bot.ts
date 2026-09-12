@@ -369,6 +369,7 @@ async function showReferral(id: number) {
     return;
   }
   const stats = await referralStats(id);
+  const pointsPerReferral = Math.max(0, num(await getSetting("referral_points", "1")));
   const valid = num(stats.valid);
   const milestonesList = await milestones();
   const next = milestonesList.find((milestone) => milestone.enabled && num(milestone.required_valid_referrals) > valid);
@@ -379,6 +380,7 @@ async function showReferral(id: number) {
     `👥 <b>REFER &amp; EARN</b>\n\n` +
       `Invite friends and unlock free rewards together.\n\n` +
       `🔗 <b>Your referral link</b>\n<code>${html(link)}</code>\n\n` +
+      `💎 <b>Reward per valid referral:</b> ${pointsPerReferral} point${pointsPerReferral === 1 ? "" : "s"}\n\n` +
       `📊 <b>Your progress</b>\n` +
       `👥 Total: <b>${stats.total}</b>  ·  ✅ Valid: <b>${stats.valid}</b>\n` +
       `⏳ Pending: <b>${stats.pending}</b>\n\n` +
@@ -395,7 +397,13 @@ async function showReferral(id: number) {
 
 async function showStock(id: number, page = 0, messageId?: number) {
   const rows = await products(page);
-  let text = "🎁 <b>REWARD CATALOG</b>\n\nChoose a reward to view its requirements and live availability.\n\n";
+  const summary = await profile(id);
+  const totalStock = rows.reduce((total, row) => total + num(row.stock), 0);
+  let text =
+    `🎁 <b>REWARD CATALOG</b>\n\n` +
+    `💎 Your points: <b>${num(summary.user?.points)}</b>\n` +
+    `📦 Total available stock: <b>${totalStock}</b>\n\n` +
+    `Choose a reward to view its requirements and live availability.\n\n`;
   if (!rows.length) text += "No rewards are available right now. Please check back soon.";
   for (const row of rows) {
     text += `🎁 <b>${html(row.name)}</b>\n💎 ${row.required_points} points  ·  ${num(row.stock) > 0 ? `📦 <b>${row.stock} available</b>` : "🔴 <b>Out of stock</b>"}\n\n`;
@@ -405,10 +413,6 @@ async function showStock(id: number, page = 0, messageId?: number) {
       text: `${num(row.stock) > 0 ? "🎟️" : "📦"} ${row.name}`,
       callback_data: `product:${row.id}`,
     },
-  ]);
-  buttons.push([
-    ...(page > 0 ? [{ text: "◀️ Previous", callback_data: `stock:${page - 1}` }] : []),
-    ...(rows.length === 6 ? [{ text: "Next ▶️", callback_data: `stock:${page + 1}` }] : []),
   ]);
   buttons.push([{ text: "🏠 Home", callback_data: "home_menu" }]);
   if (messageId) await edit(id, messageId, text, inline(...buttons), "HTML");
@@ -649,11 +653,13 @@ async function adminContent(id: number, messageId: number) {
 async function adminSettings(id: number, messageId: number) {
   const enabled = (await getSetting("maintenance_enabled", "false")) === "true";
   const referralsEnabled = (await getSetting("referrals_enabled", "true")) === "true";
+  const pointsPerReferral = Math.max(0, num(await getSetting("referral_points", "1")));
   const supportUsername = await getSetting("support_username", "SupportBot");
   const owner = await isOwner(id);
   const buttons: AnyRecord[][] = [
     [{ text: enabled ? "🔴 Disable Maintenance" : "🟢 Enable Maintenance", callback_data: `admin:maintenance:${enabled ? 0 : 1}` }],
     [{ text: referralsEnabled ? "🔴 Pause Referrals" : "🟢 Enable Referrals", callback_data: `admin:referrals:${referralsEnabled ? 0 : 1}` }],
+    [{ text: `💎 Points per Referral: ${pointsPerReferral}`, callback_data: "admin:referralpoints" }],
     [{ text: "💬 Edit Support Bot", callback_data: "admin:editsupport" }],
     [{ text: "📝 Content Management", callback_data: "admin:content" }],
   ];
@@ -667,6 +673,7 @@ async function adminSettings(id: number, messageId: number) {
     `🛠️ <b>BOT SETTINGS</b>\n\n` +
       `Maintenance mode: ${enabled ? "🟢 Enabled" : "🔴 Disabled"}\n` +
       `Referral program: ${referralsEnabled ? "🟢 Enabled" : "🔴 Paused"}\n` +
+      `Points per valid referral: <b>${pointsPerReferral}</b>\n` +
       `Support Bot: <code>${html(supportUsername)}</code>\n` +
       `Support link: <code>${html(supportLink(supportUsername))}</code>`,
     inline(...buttons),
@@ -932,6 +939,21 @@ async function adminInput(id: number, message: AnyRecord, state: AnyRecord) {
     adminStates.delete(id);
     return send(id, `✅ Support Bot updated.\n\n🔗 <code>${html(supportLink(normalized))}</code>`, inline([{ text: "🛠️ Bot Settings", callback_data: "admin:settings" }]), "HTML");
   }
+  if (state.kind === "referralPoints") {
+    const points = Number(text);
+    if (!Number.isSafeInteger(points) || points < 0 || points > 1_000_000) {
+      return send(id, "Send a whole number between 0 and 1,000,000.");
+    }
+    await setSetting("referral_points", String(points));
+    await audit(id, "referral_points_update", String(points));
+    adminStates.delete(id);
+    return send(
+      id,
+      `✅ <b>Referral points updated</b>\n\nEach valid referral now gives <b>${points}</b> point${points === 1 ? "" : "s"}.`,
+      inline([{ text: "🛠️ Bot Settings", callback_data: "admin:settings" }]),
+      "HTML",
+    );
+  }
   if (state.kind === "pointsUserId") {
     const target = Number(text);
     if (!Number.isSafeInteger(target) || target <= 0) return send(id, "Send a valid Telegram User ID.");
@@ -1043,6 +1065,16 @@ async function adminCallback(query: AnyRecord) {
   if (data === "admin:channels") return adminChannels(id, messageId);
   if (data === "admin:content") return adminContent(id, messageId);
   if (data === "admin:settings") return adminSettings(id, messageId);
+  if (data === "admin:referralpoints") {
+    const current = Math.max(0, num(await getSetting("referral_points", "1")));
+    adminStates.set(id, { kind: "referralPoints" });
+    return send(
+      id,
+      `💎 <b>REFERRAL POINT CONTROL</b>\n\nCurrent reward: <b>${current}</b> point${current === 1 ? "" : "s"} per valid referral.\n\nSend the new points amount. Use 0 to disable points while keeping referrals enabled.`,
+      inline([{ text: "❌ Cancel", callback_data: "admin:cancelinput" }]),
+      "HTML",
+    );
+  }
   if (data === "admin:admins") return adminAdmins(id, messageId);
   if (data === "admin:users") return adminUsers(id, messageId);
   if (data === "admin:lowstock") return adminLowStock(id, messageId);
