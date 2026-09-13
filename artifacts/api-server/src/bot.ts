@@ -335,9 +335,20 @@ async function startOnboarding(message: AnyRecord) {
       "🔔 𝗡𝗘𝗪 𝗥𝗘𝗙𝗘𝗥𝗥𝗔𝗟!\n\nSomeone joined using your link! ⏳ Waiting for them to join the required channels and accept the disclaimer.",
     ).catch(() => undefined);
   }
-  if (!result.isNew && result.status === "completed") {
-    if (await protectedUser(id)) await showHome(id);
-    return;
+  if (!result.isNew) {
+    if (!(await protectedUser(id, undefined, true))) return;
+    if (result.status === "completed") {
+      await showHome(id);
+      return;
+    }
+    if (result.status === "subscribed") {
+      await showDisclaimer(id);
+      return;
+    }
+    if (result.status === "disclaimer_accepted") {
+      await showStartUsing(id);
+      return;
+    }
   }
   const required = await channels();
   if (required.length) {
