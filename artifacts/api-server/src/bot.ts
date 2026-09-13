@@ -600,6 +600,7 @@ async function adminProduct(id: number, messageId: number, productId: number) {
   }
   await edit(id, messageId, `🎁 <b>PRODUCT EDITOR</b>\n\n<b>${html(row.name)}</b>\n\n💎 Cost: <b>${row.required_points} points</b>\n📦 Available stock: <b>${row.stock}</b>\n📖 How to use: <b>${row.how_to_use ? "Configured" : "Not configured"}</b>\n${row.enabled ? "🟢 Enabled" : "🔴 Disabled"}`, inline(
     [{ text: row.enabled ? "🔴 Disable" : "🟢 Enable", callback_data: `admin:toggleproduct:${row.id}` }],
+    [{ text: "💎 Change Claim Cost", callback_data: `admin:editcost:${row.id}` }],
     [{ text: "➕ Add Stock", callback_data: `admin:addstock:${row.id}` }],
     [{ text: "📦 Bulk Add Stock", callback_data: `admin:bulkstock:${row.id}` }],
     [{ text: "📖 How to Use", callback_data: `admin:howto:${row.id}` }],
@@ -891,6 +892,24 @@ async function adminInput(id: number, message: AnyRecord, state: AnyRecord) {
     if (!text) return send(id, "Send one coupon code, link, or JSON item.");
     adminStates.set(id, { ...state, kind: "productConfirm", code: text });
     return send(id, `✅ Preview\n\n🎁 ${state.name}\n💎 Points: ${state.points}\n📖 How to use: ${state.howToUse || "Not configured"}\n📦 Stock: 1`, inline([{ text: "✅ Confirm Product", callback_data: "admin:confirmproduct" }], [{ text: "❌ Cancel", callback_data: "admin:cancelinput" }]));
+  }
+  if (state.kind === "productPointsEdit") {
+    const points = Number(text);
+    if (!Number.isSafeInteger(points) || points < 0 || points > 1_000_000) {
+      return send(id, "Send a whole number between 0 and 1,000,000.");
+    }
+    await setProduct(state.productId, { points });
+    await audit(id, "product_claim_cost_update", String(state.productId), `${state.currentPoints} → ${points} points`);
+    adminStates.delete(id);
+    return send(
+      id,
+      `✅ <b>Claim cost updated</b>\n\n🎁 ${html(state.productName)}\n💎 New cost: <b>${points} point${points === 1 ? "" : "s"}</b>`,
+      inline(
+        [{ text: "✏️ Product Editor", callback_data: `admin:product:${state.productId}` }],
+        [{ text: "🎁 Stock Management", callback_data: "admin:stock" }],
+      ),
+      "HTML",
+    );
   }
   if (state.kind === "stockCode") {
     if (!text) return send(id, "Send one coupon code, link, or JSON item.");
@@ -1207,6 +1226,23 @@ async function adminCallback(query: AnyRecord) {
     await moveProduct(num(productId), direction);
     await audit(id, "product_reorder", productId, direction);
     return adminReorder(id, messageId);
+  }
+  if (data.startsWith("admin:editcost:")) {
+    const productId = num(data.split(":")[2]);
+    const row = await product(productId);
+    if (!row) return send(id, "❌ Product not found.", inline([{ text: "⬅️ Stock Management", callback_data: "admin:stock" }]));
+    adminStates.set(id, {
+      kind: "productPointsEdit",
+      productId,
+      productName: row.name,
+      currentPoints: num(row.required_points),
+    });
+    return send(
+      id,
+      `💎 <b>CHANGE CLAIM COST</b>\n\n🎁 Product: <b>${html(row.name)}</b>\nCurrent cost: <b>${row.required_points} points</b>\n\nSend the new claim cost as a whole number between 0 and 1,000,000.`,
+      inline([{ text: "❌ Cancel", callback_data: "admin:cancelinput" }]),
+      "HTML",
+    );
   }
   if (data.startsWith("admin:howto:")) {
     const productId = num(data.split(":")[2]);
