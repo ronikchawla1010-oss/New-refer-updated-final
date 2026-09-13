@@ -206,7 +206,7 @@ async function maintenanceMessage() {
   return getSetting("maintenance_message", "🛠️ The bot is temporarily under maintenance.");
 }
 
-async function protectedUser(id: number) {
+async function protectedUser(id: number, messageId?: number, skipSubscriptionCheck = false) {
   const user = await userById(id);
   if (!user) return false;
   if (user.banned) {
@@ -215,6 +215,11 @@ async function protectedUser(id: number) {
   }
   if ((await getSetting("maintenance_enabled", "false")) === "true") {
     await send(id, await maintenanceMessage());
+    return false;
+  }
+  const required = await channels();
+  if (!skipSubscriptionCheck && required.length && !(await checkSubscriptions(id))) {
+    await showWelcome(id, messageId);
     return false;
   }
   return true;
@@ -1392,16 +1397,17 @@ async function handleCallback(query: AnyRecord) {
   const data = String(query.data ?? "");
   await callback(query.id);
   if (data.startsWith("admin:") || data.startsWith("broadcast:")) return adminCallback(query);
-  if (!(await protectedUser(id))) return;
   const messageId = num(query.message?.message_id);
-  if (data === "home" || data === "home_menu") return showHome(id, messageId);
   if (data === "check_sub") {
+    if (!(await protectedUser(id, messageId, true))) return;
     if (!(await checkSubscriptions(id))) {
       return edit(id, messageId, "❌ Please join ALL required channels first, then tap Check Subscription.", inline([{ text: "🔄 Check Subscription", callback_data: "check_sub" }]));
     }
     await markStatus(id, "subscribed");
     return showDisclaimer(id, messageId);
   }
+  if (!(await protectedUser(id, messageId))) return;
+  if (data === "home" || data === "home_menu") return showHome(id, messageId);
   if (data === "accept_disclaimer") {
     await markStatus(id, "disclaimer_accepted", true);
     return showStartUsing(id, messageId);
